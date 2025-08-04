@@ -1,13 +1,13 @@
 {
-  "originHash" : "08de61941b7919a65e36c0e34f8c1c41995469b86a39122158b75b4a68c4527d",
+  "originHash" : "ed2c6b3577fe15b31a13273a1502145e7050f87dd688213e03c183b6fe58c36a",
   "pins" : [
     {
       "identity" : "eventsource",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/loopwork-ai/eventsource.git",
+      "location" : "https://github.com/mattt/eventsource.git",
       "state" : {
-        "revision" : "e83f076811f32757305b8bf69ac92d05626ffdd7",
-        "version" : "1.1.0"
+        "revision" : "07957602bb99a5355c810187e66e6ce378a1057d",
+        "version" : "1.1.1"
       }
     },
     {
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "96a2f8a0fa41e9e09af4585e2724c4e825410b91",
         "version" : "1.6.2"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-syntax.git",
+      "state" : {
+        "revision" : "64889f0c732f210a935a0ad7cda38f77f876262d",
+        "version" : "509.1.1"
       }
     },
     {
