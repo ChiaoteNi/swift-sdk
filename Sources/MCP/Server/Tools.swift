@@ -262,3 +262,35 @@ public enum CallTool: Method {
 public struct ToolListChangedNotification: Notification {
     public static let name: String = "notifications/tools/list_changed"
 }
+
+// MARK: - Type-Safe Parameter Parsing
+
+/// Protocol for types that can be parsed from MCP tool arguments
+/// This is typically implemented by structs decorated with @ToolRegistration, @Schema, etc.
+public protocol MCPParameterParsable {
+    /// Parse tool arguments into a strongly-typed instance
+    static func parseArguments(_ args: [String: Value]) -> Self?
+}
+
+extension CallTool.Parameters {
+    /// Parse tool parameters as a strongly-typed struct
+    /// This provides type-safe parameter extraction instead of manual string-based parsing
+    ///
+    /// Usage:
+    /// ```swift
+    /// @Schema
+    /// struct FormatTemplateInput {
+    ///     @Field(description: "Format type", validOptions: ["commit", "pr-title"])  
+    ///     let formatType: String
+    /// }
+    ///
+    /// // In your tool handler:
+    /// guard let input = params.parseAs(FormatTemplateInput.self) else {
+    ///     return .init(content: [.text("Invalid parameters")], isError: true)
+    /// }
+    /// // Now you can use input.formatType directly
+    /// ```
+    public func parseAs<T>(_ type: T.Type) -> T? where T: MCPParameterParsable {
+        return T.parseArguments(self.arguments ?? [:])
+    }
+}
