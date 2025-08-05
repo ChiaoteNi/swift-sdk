@@ -113,24 +113,6 @@ private func generateRequiredFields(from properties: [SchemaFieldInfo]) -> Strin
 }
 
 
-private func generateParseArgumentsBody(structName: String, properties: [SchemaFieldInfo]) -> String {
-    let propertyExtractions = properties.map { property in
-        let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-        if property.isOptional {
-            let baseType = property.type.replacingOccurrences(of: "?", with: "")
-            return "                    let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
-        } else {
-            return "                    let \(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)"
-        }
-    }.joined(separator: ",\n")
-    
-    let propertyList = properties.map { property in
-        let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-        return "\(property.name): \(varName)"
-    }.joined(separator: ", ")
-    
-    return "                guard\n\(propertyExtractions)\n                else { \n                    return nil \n                }\n                \n                return \(structName)(\(propertyList))"
-}
 
 private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String {
     switch swiftType {
@@ -148,114 +130,6 @@ private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String {
     }
 }
 
-// MARK: - SchemaField Macro
-
-public struct SchemaFieldMacro: PeerMacro {
-    public static func expansion(
-        of node: AttributeSyntax,
-        providingPeersOf declaration: some DeclSyntaxProtocol,
-        in context: some MacroExpansionContext
-    ) throws -> [DeclSyntax] {
-        // SchemaField is primarily used as an annotation for ToolRegistrationMacro
-        // It doesn't generate additional code itself
-        return []
-    }
-}
-
-// MARK: - InputSchema Macro
-
-public struct InputSchemaMacro: ExtensionMacro {
-    public static func expansion(
-        of node: AttributeSyntax,
-        attachedTo declaration: some DeclGroupSyntax,
-        providingExtensionsOf type: some TypeSyntaxProtocol,
-        conformingTo protocols: [TypeSyntax],
-        in context: some MacroExpansionContext
-    ) throws -> [ExtensionDeclSyntax] {
-        guard let structDecl = declaration.as(StructDeclSyntax.self) else {
-            throw MacroError.invalidDeclaration("@InputSchema can only be applied to structs")
-        }
-        
-        let properties = extractSchemaFields(from: structDecl)
-        let schemaProperties = generateAdvancedSchemaProperties(from: properties)
-        let requiredFields = generateRequiredFields(from: properties)
-        
-        let propertyExtractions = properties.map { property in
-            let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-            if property.isOptional {
-                let baseType = property.type.replacingOccurrences(of: "?", with: "")
-                return "let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
-            } else {
-                return "let \(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)"
-            }
-        }.joined(separator: ",\n                    ")
-        
-        let propertyList = properties.map { property in
-            let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-            return "\(property.name): \(varName)"
-        }.joined(separator: ", ")
-        
-        let extensionDecl: ExtensionDeclSyntax = try ExtensionDeclSyntax("""
-        extension \(type): MCP.MCPParameterParsable {
-            public static var inputSchema: MCP.Value {
-                .object([
-                    "type": .string("object"),
-                    "properties": .object([
-        \(raw: schemaProperties)
-                    ])\(raw: requiredFields.isEmpty ? "" : ",\n                    \"required\": .array([\(requiredFields)])")
-                ])
-            }
-            
-            public static func parseArguments(_ args: [String: MCP.Value]) -> \(type)? {
-                guard
-                    \(raw: propertyExtractions)
-                else { 
-                    return nil 
-                }
-                
-                return \(type)(\(raw: propertyList))
-            }
-        }
-        """)
-        
-        return [extensionDecl]
-    }
-}
-
-// MARK: - OutputSchema Macro
-
-public struct OutputSchemaMacro: ExtensionMacro {
-    public static func expansion(
-        of node: AttributeSyntax,
-        attachedTo declaration: some DeclGroupSyntax,
-        providingExtensionsOf type: some TypeSyntaxProtocol,
-        conformingTo protocols: [TypeSyntax],
-        in context: some MacroExpansionContext
-    ) throws -> [ExtensionDeclSyntax] {
-        guard let structDecl = declaration.as(StructDeclSyntax.self) else {
-            throw MacroError.invalidDeclaration("@OutputSchema can only be applied to structs")
-        }
-        
-        let properties = extractSchemaFields(from: structDecl)
-        let schemaProperties = generateAdvancedSchemaProperties(from: properties)
-        let requiredFields = generateRequiredFields(from: properties)
-        
-        let extensionDecl: ExtensionDeclSyntax = try ExtensionDeclSyntax("""
-        extension \(type) {
-            public static var outputSchema: MCP.Value {
-                .object([
-                    "type": .string("object"),
-                    "properties": .object([
-        \(raw: schemaProperties)
-                    ])\(raw: requiredFields.isEmpty ? "" : ",\n                    \"required\": .array([\(requiredFields)])")
-                ])
-            }
-        }
-        """)
-        
-        return [extensionDecl]
-    }
-}
 
 // MARK: - Schema Macro (Simpler API)
 
