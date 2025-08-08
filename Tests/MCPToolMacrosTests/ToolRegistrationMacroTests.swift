@@ -104,4 +104,79 @@ extension UserProfile: MCP.MCPParameterParsable {
             ]
         )
     }
+
+    func testSchemaMacroWithNestedSchema() throws {
+        assertMacroExpansion(
+            """
+            @Schema
+            struct Address {
+                @Field(description: "Street")
+                let street: String
+            }
+
+            @Schema
+            struct User {
+                @Field(description: "User address")
+                let address: Address
+            }
+            """,
+            expandedSource: """
+struct Address {
+    let street: String
+}
+
+extension Address: MCP.MCPParameterParsable {
+    public static var inputSchema: MCP.Value {
+        .object([
+            "type": .string("object"),
+            "properties": .object([
+                            "street": .object(["type": .string("string"), "description": .string("Street")])
+            ]),
+                    "required": .array([.string("street")])
+        ])
+    }
+
+    public static func parseArguments(_ args: [String: MCP.Value]) -> Address? {
+        guard
+            let parsedStreet = String(args["street"] ?? .null)
+        else {
+            return nil
+        }
+
+        return Address(street: parsedStreet)
+    }
+}
+
+struct User {
+    let address: Address
+}
+
+extension User: MCP.MCPParameterParsable {
+    public static var inputSchema: MCP.Value {
+        .object([
+            "type": .string("object"),
+            "properties": .object([
+                            "address": Address.inputSchema
+            ]),
+                    "required": .array([.string("address")])
+        ])
+    }
+
+    public static func parseArguments(_ args: [String: MCP.Value]) -> User? {
+        guard
+            let parsedAddress = Address.parseArguments(args["address"]?.objectValue ?? Dictionary<String, MCP.Value>())
+        else {
+            return nil
+        }
+
+        return User(address: parsedAddress)
+    }
+}
+""",
+            macros: [
+                "Schema": SchemaMacro.self,
+                "Field": FieldMacro.self
+            ]
+        )
+    }
 }
