@@ -88,22 +88,28 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
 }
 
 
-private func generateAdvancedSchemaProperties(from properties: [SchemaFieldInfo]) -> String {
-    return properties.map { property in
-        let jsonSchemaType = swiftTypeToJsonSchemaType(property.type)
-        var schemaComponents: [String] = ["\"type\": .string(\"\(jsonSchemaType)\")"]
-        
-        if let description = property.description {
-            schemaComponents.append("\"description\": .string(\"\(description)\")")
+private func generateAdvancedSchemaProperties(from properties: [SchemaFieldInfo], in root: Syntax) throws -> String {
+    return try properties.map { property in
+        let baseType = property.type.replacingOccurrences(of: "?", with: "")
+        if let jsonSchemaType = swiftTypeToJsonSchemaType(baseType) {
+            var schemaComponents: [String] = ["\"type\": .string(\"\(jsonSchemaType)\")"]
+
+            if let description = property.description {
+                schemaComponents.append("\"description\": .string(\"\(description)\")")
+            }
+
+            if let enumValues = property.enumValues, !enumValues.isEmpty {
+                let enumValuesString = enumValues.map { ".string(\"\($0)\")" }.joined(separator: ", ")
+                schemaComponents.append("\"enum\": .array([\(enumValuesString)])")
+            }
+
+            let schemaString = schemaComponents.joined(separator: ", ")
+            return "                            \"\(property.name)\": .object([\(schemaString)])"
+        } else if isSchemaAnnotatedType(baseType, in: root) {
+            return "                            \"\(property.name)\": \(baseType).inputSchema"
+        } else {
+            throw MacroError.unsupportedType("Unsupported type \(property.type) for property \(property.name)")
         }
-        
-        if let enumValues = property.enumValues, !enumValues.isEmpty {
-            let enumValuesString = enumValues.map { ".string(\"\($0)\")" }.joined(separator: ", ")
-            schemaComponents.append("\"enum\": .array([\(enumValuesString)])")
-        }
-        
-        let schemaString = schemaComponents.joined(separator: ", ")
-        return "                            \"\(property.name)\": .object([\(schemaString)])"
     }.joined(separator: ",\n")
 }
 
@@ -114,7 +120,7 @@ private func generateRequiredFields(from properties: [SchemaFieldInfo]) -> Strin
 
 
 
-private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String {
+private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String? {
     switch swiftType {
     case "String":
         return "string"
@@ -125,9 +131,40 @@ private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String {
     case "Bool":
         return "boolean"
     default:
-        // Default to string for unknown types
-        return "string"
+        return nil
     }
+}
+
+private func isSchemaAnnotatedType(_ typeName: String, in root: Syntax) -> Bool {
+    class Finder: SyntaxVisitor {
+        let typeName: String
+        var found = false
+
+        init(typeName: String) {
+            self.typeName = typeName
+            super.init(viewMode: .all)
+        }
+
+        override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+            if node.name.text == typeName {
+                if let attrs = node.attributes {
+                    for attr in attrs {
+                        if let attr = attr.as(AttributeSyntax.self),
+                           let id = attr.attributeName.as(IdentifierTypeSyntax.self),
+                           id.name.text == "Schema" {
+                            found = true
+                            return .skipChildren
+                        }
+                    }
+                }
+            }
+            return .visitChildren
+        }
+    }
+
+    let finder = Finder(typeName: typeName)
+    finder.walk(root)
+    return finder.found
 }
 
 
@@ -146,16 +183,31 @@ public struct SchemaMacro: ExtensionMacro {
         }
         
         let properties = extractSchemaFields(from: structDecl)
-        let schemaProperties = generateAdvancedSchemaProperties(from: properties)
+        var root: Syntax = Syntax(structDecl)
+        while let parent = root.parent { root = parent }
+
+        let schemaProperties = try generateAdvancedSchemaProperties(from: properties, in: root)
         let requiredFields = generateRequiredFields(from: properties)
-        
-        let propertyExtractions = properties.map { property in
+
+        let propertyExtractions = try properties.map { property in
             let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
             if property.isOptional {
                 let baseType = property.type.replacingOccurrences(of: "?", with: "")
-                return "let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
+                if swiftTypeToJsonSchemaType(baseType) != nil {
+                    return "let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
+                } else if isSchemaAnnotatedType(baseType, in: root) {
+                    return "let \(varName) = args[\"\(property.name)\"].flatMap { \(baseType).parseArguments($0.objectValue ?? Dictionary<String, MCP.Value>()) }"
+                } else {
+                    throw MacroError.unsupportedType("Unsupported type \(property.type) for property \(property.name)")
+                }
             } else {
-                return "let \(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)"
+                if swiftTypeToJsonSchemaType(property.type) != nil {
+                    return "let \(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)"
+                } else if isSchemaAnnotatedType(property.type, in: root) {
+                    return "let \(varName) = \(property.type).parseArguments(args[\"\(property.name)\"]?.objectValue ?? Dictionary<String, MCP.Value>())"
+                } else {
+                    throw MacroError.unsupportedType("Unsupported type \(property.type) for property \(property.name)")
+                }
             }
         }.joined(separator: ",\n                    ")
         
@@ -210,6 +262,7 @@ public struct FieldMacro: PeerMacro {
 enum MacroError: Error, CustomStringConvertible {
     case invalidDeclaration(String)
     case missingArguments(String)
+    case unsupportedType(String)
     
     var description: String {
         switch self {
@@ -217,6 +270,8 @@ enum MacroError: Error, CustomStringConvertible {
             return "Invalid declaration: \(message)"
         case .missingArguments(let message):
             return "Missing arguments: \(message)"
+        case .unsupportedType(let message):
+            return "Unsupported type: \(message)"
         }
     }
 }
