@@ -279,7 +279,7 @@ extension CallTool.Parameters {
     /// ```swift
     /// @Schema
     /// struct FormatTemplateInput {
-    ///     @Field(description: "Format type", validOptions: ["commit", "pr-title"])  
+    ///     @Field(description: "Format type", constraint: .options(["commit", "pr-title"]))  
     ///     let formatType: String
     /// }
     ///

@@ -9,7 +9,7 @@ import Foundation
 /// ```swift
 /// @Schema
 /// struct FormatTemplateInput {
-///     @Field(description: "The type of format template", validOptions: ["commit", "pr-title"])
+///     @Field(description: "The type of format template", constraint: .options(["commit", "pr-title"]))
 ///     let formatType: String
 /// }
 /// ```
