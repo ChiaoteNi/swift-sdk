@@ -1,20 +1,24 @@
 // swift-tools-version:6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
+import CompilerPluginSupport
 import PackageDescription
 
 // Base dependencies needed on all platforms
 var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-    .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0")
+    .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0"),
+    .package(url: "https://github.com/apple/swift-syntax.git", from: "509.0.0"),
 ]
 
 // Target dependencies needed on all platforms
 var targetDependencies: [Target.Dependency] = [
     .product(name: "SystemPackage", package: "swift-system"),
     .product(name: "Logging", package: "swift-log"),
-    .product(name: "EventSource", package: "eventsource", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS]))
+    .product(
+        name: "EventSource", package: "eventsource",
+        condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS])),
 ]
 
 let package = Package(
@@ -31,7 +35,10 @@ let package = Package(
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "MCP",
-            targets: ["MCP"])
+            targets: ["MCP"]),
+        .library(
+            name: "MCPToolMacrosPlugin",
+            targets: ["MCPToolMacrosPlugin"]),
     ],
     dependencies: dependencies,
     targets: [
@@ -40,8 +47,27 @@ let package = Package(
         .target(
             name: "MCP",
             dependencies: targetDependencies),
+        .macro(
+            name: "MCPToolMacros",
+            dependencies: [
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+            ]
+        ),
+        .target(
+            name: "MCPToolMacrosPlugin",
+            dependencies: ["MCP", "MCPToolMacros"]
+        ),
         .testTarget(
             name: "MCPTests",
             dependencies: ["MCP"] + targetDependencies),
+        .testTarget(
+            name: "MCPToolMacrosTests",
+            dependencies: [
+                "MCPToolMacros",
+                "MCPToolMacrosPlugin",
+                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
+            ]
+        ),
     ]
 )
