@@ -229,101 +229,165 @@ private func generateRequiredFields(from properties: [SchemaFieldInfo]) -> Strin
     return requiredFields.joined(separator: ",\n\(SCHEMA_INDENT)")
 }
 
-// 共用的 macro 展開邏輯
-private func generateSchemaExtension(
-    for type: some TypeSyntaxProtocol,
-    from structDecl: StructDeclSyntax,
-    protocolName: String,
-    schemaPropertyName: String,
-    parseMethodName: String,
-    parseMethodSignature: String
-) throws -> ExtensionDeclSyntax {
-    let properties = extractSchemaFields(from: structDecl)
-    var root: Syntax = Syntax(structDecl)
-    while let parent = root.parent { root = parent }
+// MARK: - Property Classification
 
-    let schemaProperties = generateAdvancedSchemaProperties(from: properties, in: root)
-    let requiredFields = generateRequiredFields(from: properties)
+struct PropertyClassification {
+    let schemaFields: [SchemaFieldInfo]
+    let optionalFields: [SchemaFieldInfo]
+    let requiredFields: [SchemaFieldInfo]
+    let allProperties: [PropertyInfo]
+}
 
-    // 分離可選和必需字段的解析邏輯
-    let optionalProperties = properties.filter { $0.isOptional }
-    let requiredProperties = properties.filter { !$0.isOptional }
+private func classifyProperties(from structDecl: StructDeclSyntax) -> PropertyClassification {
+    let schemaFields = extractSchemaFields(from: structDecl)
+    let allProperties = extractAllProperties(from: structDecl)
     
-    let optionalExtractions = optionalProperties.map { property in
-        let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-        let baseType = property.type.replacingOccurrences(of: "?", with: "")
-        
-        if swiftTypeToJsonSchemaType(baseType) != nil {
-            return "let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
-        } else if baseType.hasPrefix("[") && baseType.hasSuffix("]") {
-            let elementType = String(baseType.dropFirst().dropLast())
-            return "let \(varName) = args[\"\(property.name)\"]?.arrayValue?.compactMap({ \(elementType).parseArguments($0.objectValue ?? [:]) })"
-        } else {
-            return "let \(varName) = args[\"\(property.name)\"].flatMap { \(baseType).parseArguments($0.objectValue ?? Dictionary<String, MCP.Value>()) }"
-        }
+    let optionalFields = schemaFields.filter { $0.isOptional }
+    let requiredFields = schemaFields.filter { !$0.isOptional }
+    
+    return PropertyClassification(
+        schemaFields: schemaFields,
+        optionalFields: optionalFields,
+        requiredFields: requiredFields,
+        allProperties: allProperties
+    )
+}
+
+// MARK: - Parsing Logic Generation
+
+struct ParsingLogic {
+    let optionalExtractions: [String]
+    let requiredGuardBindings: [String]
+    let requiredPostGuardLines: [String]
+    let schemaCheckLines: [String]
+    let propertyList: String
+}
+
+private func generateParsingLogic(
+    for classification: PropertyClassification
+) throws -> ParsingLogic {
+    
+    // Optional field extractions
+    let optionalExtractions = classification.optionalFields.map { property in
+        return generateOptionalExtraction(for: property)
     }
     
-    // 必填欄位：將需要 Optional 綁定的條件放入 guard，並在 guard 之後做必要的後處理（例如必填陣列的解析）
+    // Required field processing
     var requiredGuardBindings: [String] = []
     var requiredPostGuardLines: [String] = []
-    for property in requiredProperties {
-        let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-        if swiftTypeToJsonSchemaType(property.type) != nil {
-            requiredGuardBindings.append("\(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)")
-        } else if property.type.hasPrefix("[") && property.type.hasSuffix("]") {
-            let elementType = String(property.type.dropFirst().dropLast())
-            let rawName = "raw\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-            requiredGuardBindings.append("\(rawName) = args[\"\(property.name)\"]?.arrayValue")
-            requiredPostGuardLines.append("let \(varName) = \(rawName).compactMap({ \(elementType).parseArguments($0.objectValue ?? [:]) })")
-        } else {
-            requiredGuardBindings.append("\(varName) = \(property.type).parseArguments(args[\"\(property.name)\"]?.objectValue ?? Dictionary<String, MCP.Value>())")
+    
+    for property in classification.requiredFields {
+        let (guardBinding, postGuardLine) = generateRequiredFieldLogic(for: property)
+        requiredGuardBindings.append(guardBinding)
+        if let postGuard = postGuardLine {
+            requiredPostGuardLines.append(postGuard)
         }
     }
     
-    // propertyExtractions 不再需要，因為我們已經分離了可選和必需字段的處理
+    // Schema type checking
+    let schemaCheckLines = generateSchemaTypeChecks(for: classification.schemaFields)
     
-    // 提取所有屬性（包含非 @Field 的屬性）來生成完整的建構子呼叫
-    let allProperties = extractAllProperties(from: structDecl)
-    let propertyList = try allProperties.compactMap { propertyInfo -> String? in
-        if let fieldProperty = properties.first(where: { $0.name == propertyInfo.name }) {
-            // 這是 @Field 屬性，使用解析出的值
-            let varName = "parsed\(fieldProperty.name.prefix(1).uppercased())\(fieldProperty.name.dropFirst())"
-            return "\(propertyInfo.name): \(varName)"
-        } else {
-            // 這是非 @Field 屬性，根據類型和預設值決定處理方式
-            if propertyInfo.hasDefaultValue {
-                // 有預設值的屬性不需要在建構子中指定
-                return nil
-            } else if propertyInfo.isOptional {
-                // 可選屬性預設為 nil
-                return "\(propertyInfo.name): nil"
-            } else {
-                // 必需屬性但沒有 @Field - 這是設計問題，直接丟錯，要求提供預設值或改為可選/@Field
-                throw MacroError.missingArguments("Property '\(propertyInfo.name)' is non-optional and not marked with @Field or default value. Provide a default or mark it optional/@Field.")
-            }
-        }
-    }.joined(separator: ",\n            ")
+    // Constructor property list
+    let propertyList = try generatePropertyConstructorList(
+        schemaFields: classification.schemaFields,
+        allProperties: classification.allProperties
+    )
+    
+    return ParsingLogic(
+        optionalExtractions: optionalExtractions,
+        requiredGuardBindings: requiredGuardBindings,
+        requiredPostGuardLines: requiredPostGuardLines,
+        schemaCheckLines: schemaCheckLines,
+        propertyList: propertyList
+    )
+}
 
-    // 針對所有使用到的 nested 型別，強制在編譯期檢查其是否提供 Schema/Parse（由 @Schema 生成）
+private func generateOptionalExtraction(for property: SchemaFieldInfo) -> String {
+    let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
+    let baseType = property.type.replacingOccurrences(of: "?", with: "")
+    
+    if swiftTypeToJsonSchemaType(baseType) != nil {
+        return "let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
+    } else if baseType.hasPrefix("[") && baseType.hasSuffix("]") {
+        let elementType = String(baseType.dropFirst().dropLast())
+        return "let \(varName) = args[\"\(property.name)\"]?.arrayValue?.compactMap({ \(elementType).parseArguments($0.objectValue ?? [:]) })"
+    } else {
+        return "let \(varName) = args[\"\(property.name)\"].flatMap { \(baseType).parseArguments($0.objectValue ?? Dictionary<String, MCP.Value>()) }"
+    }
+}
+
+private func generateRequiredFieldLogic(for property: SchemaFieldInfo) -> (String, String?) {
+    let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
+    
+    if swiftTypeToJsonSchemaType(property.type) != nil {
+        return ("\(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)", nil)
+    } else if property.type.hasPrefix("[") && property.type.hasSuffix("]") {
+        let elementType = String(property.type.dropFirst().dropLast())
+        let rawName = "raw\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
+        let guardBinding = "\(rawName) = args[\"\(property.name)\"]?.arrayValue"
+        let postGuard = "let \(varName) = \(rawName).compactMap({ \(elementType).parseArguments($0.objectValue ?? [:]) })"
+        return (guardBinding, postGuard)
+    } else {
+        return ("\(varName) = \(property.type).parseArguments(args[\"\(property.name)\"]?.objectValue ?? Dictionary<String, MCP.Value>())", nil)
+    }
+}
+
+private func generateSchemaTypeChecks(for properties: [SchemaFieldInfo]) -> [String] {
     var schemaCheckLines: [String] = []
+    
     func collectSchemaCheck(for typeName: String) {
         if swiftTypeToJsonSchemaType(typeName) == nil {
             schemaCheckLines.append("_requireSchema(\(typeName).self)")
         }
     }
-    for p in properties {
-        let base = p.type.replacingOccurrences(of: "?", with: "")
-        if base.hasPrefix("[") && base.hasSuffix("]") {
-            let element = String(base.dropFirst().dropLast())
-            if swiftTypeToJsonSchemaType(element) == nil {
-                collectSchemaCheck(for: element)
-            }
+    
+    for property in properties {
+        let baseType = property.type.replacingOccurrences(of: "?", with: "")
+        if baseType.hasPrefix("[") && baseType.hasSuffix("]") {
+            let elementType = String(baseType.dropFirst().dropLast())
+            collectSchemaCheck(for: elementType)
         } else {
-            if swiftTypeToJsonSchemaType(base) == nil {
-                collectSchemaCheck(for: base)
-            }
+            collectSchemaCheck(for: baseType)
         }
     }
+    
+    return schemaCheckLines
+}
+
+private func generatePropertyConstructorList(
+    schemaFields: [SchemaFieldInfo],
+    allProperties: [PropertyInfo]
+) throws -> String {
+    return try allProperties.compactMap { propertyInfo -> String? in
+        if let fieldProperty = schemaFields.first(where: { $0.name == propertyInfo.name }) {
+            // @Field property - use parsed value
+            let varName = "parsed\(fieldProperty.name.prefix(1).uppercased())\(fieldProperty.name.dropFirst())"
+            return "\(propertyInfo.name): \(varName)"
+        } else {
+            // Non-@Field property - handle based on type and defaults
+            if propertyInfo.hasDefaultValue {
+                return nil // Skip properties with default values
+            } else if propertyInfo.isOptional {
+                return "\(propertyInfo.name): nil"
+            } else {
+                throw MacroError.missingArguments("Property '\(propertyInfo.name)' is non-optional and not marked with @Field or default value. Provide a default or mark it optional/@Field.")
+            }
+        }
+    }.joined(separator: ",\n            ")
+}
+
+// MARK: - Extension Assembly
+
+private func assembleExtension(
+    for type: some TypeSyntaxProtocol,
+    protocolName: String,
+    schemaPropertyName: String,
+    parseMethodName: String,
+    parseMethodSignature: String,
+    schemaProperties: String,
+    requiredFields: String,
+    parsingLogic: ParsingLogic
+) throws -> ExtensionDeclSyntax {
     
     let extensionDecl: ExtensionDeclSyntax = try ExtensionDeclSyntax("""
     extension \(type): \(raw: protocolName) {
@@ -342,16 +406,53 @@ private func generateSchemaExtension(
         private static func _requireSchema<T: MCP.MCPParameterParsable>(_ type: T.Type) {}
         
         \(raw: parseMethodSignature) {
-            \(raw: parseMethodName == "parseArguments" ? "" : "guard let args = value.objectValue else {\n                return nil\n            }\n\n            ")\(raw: schemaCheckLines.isEmpty ? "" : "\(schemaCheckLines.joined(separator: "\n            "))\n\n            ")\(raw: optionalExtractions.isEmpty ? "" : "\(optionalExtractions.joined(separator: "\n            "))\n\n            ")\(raw: requiredGuardBindings.isEmpty ? "" : "guard let \(requiredGuardBindings.joined(separator: ",\n                let ")) else {\n                return nil\n            }\n\n            ")\(raw: requiredPostGuardLines.isEmpty ? "" : "\(requiredPostGuardLines.joined(separator: "\n            "))\n\n            ")
+            \(raw: parseMethodName == "parseArguments" ? "" : "guard let args = value.objectValue else {\n                return nil\n            }\n\n            ")\(raw: parsingLogic.schemaCheckLines.isEmpty ? "" : "\(parsingLogic.schemaCheckLines.joined(separator: "\n            "))\n\n            ")\(raw: parsingLogic.optionalExtractions.isEmpty ? "" : "\(parsingLogic.optionalExtractions.joined(separator: "\n            "))\n\n            ")\(raw: parsingLogic.requiredGuardBindings.isEmpty ? "" : "guard let \(parsingLogic.requiredGuardBindings.joined(separator: ",\n                let ")) else {\n                return nil\n            }\n\n            ")\(raw: parsingLogic.requiredPostGuardLines.isEmpty ? "" : "\(parsingLogic.requiredPostGuardLines.joined(separator: "\n            "))\n\n            ")
 
             return \(type)(
-                \(raw: propertyList)
+                \(raw: parsingLogic.propertyList)
             )
         }
     }
     """)
     
     return extensionDecl
+}
+
+// MARK: - Main Generation Function
+
+private func generateSchemaExtension(
+    for type: some TypeSyntaxProtocol,
+    from structDecl: StructDeclSyntax,
+    protocolName: String,
+    schemaPropertyName: String,
+    parseMethodName: String,
+    parseMethodSignature: String
+) throws -> ExtensionDeclSyntax {
+    
+    // 1. Classify properties
+    let classification = classifyProperties(from: structDecl)
+    
+    // 2. Generate schema components
+    var root: Syntax = Syntax(structDecl)
+    while let parent = root.parent { root = parent }
+    
+    let schemaProperties = generateAdvancedSchemaProperties(from: classification.schemaFields, in: root)
+    let requiredFields = generateRequiredFields(from: classification.schemaFields)
+    
+    // 3. Generate parsing logic
+    let parsingLogic = try generateParsingLogic(for: classification)
+    
+    // 4. Assemble final extension
+    return try assembleExtension(
+        for: type,
+        protocolName: protocolName,
+        schemaPropertyName: schemaPropertyName,
+        parseMethodName: parseMethodName,
+        parseMethodSignature: parseMethodSignature,
+        schemaProperties: schemaProperties,
+        requiredFields: requiredFields,
+        parsingLogic: parsingLogic
+    )
 }
 
 private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String? {
