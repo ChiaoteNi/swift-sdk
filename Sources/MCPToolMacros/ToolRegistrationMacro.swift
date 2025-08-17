@@ -45,7 +45,7 @@ struct FieldConstraintInfo {
 
 // MARK: - Helper Methods
 
-// 描述所有屬性的基本資訊
+// Describes basic information about all properties
 struct PropertyInfo {
     let name: String
     let type: String
@@ -79,7 +79,7 @@ private func extractAllProperties(from structDecl: StructDeclSyntax) -> [Propert
 }
 
 private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFieldInfo] {
-    // 方案A：直接解析 @Field 標註的屬性（仿照 Foundation Models）
+    // Approach A: Parse @Field marked properties directly (following Foundation Models pattern)
     var fieldInfos: [SchemaFieldInfo] = []
     
     for member in structDecl.memberBlock.members {
@@ -88,7 +88,7 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
            let pattern = binding.pattern.as(IdentifierPatternSyntax.self),
            let typeAnnotation = binding.typeAnnotation {
 
-            // 檢查是否有 @Field 屬性
+            // Check if property has @Field attribute
             let hasFieldAttribute = varDecl.attributes.contains { attribute in
                 if let attributeNode = attribute.as(AttributeSyntax.self),
                    let identifier = attributeNode.attributeName.as(IdentifierTypeSyntax.self) {
@@ -123,7 +123,7 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
                                     isRequired = boolLiteral.literal.text == "true"
                                 }
                             case "constraint":
-                                // 解析 FieldConstraint 枚舉值
+                                // Parse FieldConstraint enum value
                                 constraint = parseFieldConstraint(argument.expression)
                             default:
                                 break
@@ -133,7 +133,7 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
                 }
             }
 
-            // 如果未明確指定 isRequired，根據屬性類型推斷
+            // If isRequired not specified, infer from property type
             let finalIsRequired = isRequired ?? !propertyType.hasSuffix("?")
 
             fieldInfos.append(SchemaFieldInfo(
@@ -148,9 +148,20 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
     return fieldInfos
 }
 
-// 縮排常數  
-private let SCHEMA_INDENT = "                "        // 16 spaces for schema level
-private let PROPERTY_INDENT = "                    "  // 20 spaces for property level
+// MARK: - String Template System
+
+private func indent(_ level: Int) -> String {
+    return String(repeating: "    ", count: level)
+}
+
+private struct IndentLevel {
+    static let schema = 4      // 16 spaces for schema level
+    static let property = 5    // 20 spaces for property level
+}
+
+// Legacy constants for compatibility
+private let SCHEMA_INDENT = indent(IndentLevel.schema)
+private let PROPERTY_INDENT = indent(IndentLevel.property)
 
 private func generateAdvancedSchemaProperties(from properties: [SchemaFieldInfo], in root: Syntax) -> String {
     return properties.map { property in
@@ -304,51 +315,92 @@ private func generateParsingLogic(
 
 private func generateOptionalExtraction(for property: SchemaFieldInfo) -> String {
     let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
-    let baseType = property.type.replacingOccurrences(of: "?", with: "")
+    let swiftType = SwiftType(from: property.type)
     
-    if swiftTypeToJsonSchemaType(baseType) != nil {
-        return "let \(varName) = \(baseType)(args[\"\(property.name)\"] ?? .null)"
-    } else if baseType.hasPrefix("[") && baseType.hasSuffix("]") {
-        let elementType = String(baseType.dropFirst().dropLast())
-        return "let \(varName) = args[\"\(property.name)\"]?.arrayValue?.compactMap({ \(elementType).parseArguments($0.objectValue ?? [:]) })"
-    } else {
-        return "let \(varName) = args[\"\(property.name)\"].flatMap { \(baseType).parseArguments($0.objectValue ?? Dictionary<String, MCP.Value>()) }"
+    switch swiftType {
+    case .optional(let wrapped):
+        return generateOptionalExtractionForType(varName: varName, propertyName: property.name, type: wrapped)
+    default:
+        // This shouldn't happen for optional properties, but handle gracefully
+        return generateOptionalExtractionForType(varName: varName, propertyName: property.name, type: swiftType)
+    }
+}
+
+private func generateOptionalExtractionForType(varName: String, propertyName: String, type: SwiftType) -> String {
+    switch type {
+    case .basic(let basicType):
+        return "let \(varName) = \(basicType.rawValue)(args[\"\(propertyName)\"] ?? .null)"
+    case .array(let element):
+        switch element {
+        case .basic(let basicType):
+            return "let \(varName) = args[\"\(propertyName)\"]?.arrayValue?.compactMap({ \(basicType.rawValue)($0) })"
+        case .custom(let typeName):
+            return "let \(varName) = args[\"\(propertyName)\"]?.arrayValue?.compactMap({ \(typeName).parseArguments($0.objectValue ?? [:]) })"
+        default:
+            return "let \(varName) = args[\"\(propertyName)\"]?.arrayValue?.compactMap({ /* TODO: Complex array element */ })"
+        }
+    case .custom(let typeName):
+        return "let \(varName) = args[\"\(propertyName)\"].flatMap { \(typeName).parseArguments($0.objectValue ?? Dictionary<String, MCP.Value>()) }"
+    case .optional:
+        // Nested optionals, shouldn't happen in well-formed types
+        return "let \(varName) = args[\"\(propertyName)\"] /* TODO: Nested optional */"
     }
 }
 
 private func generateRequiredFieldLogic(for property: SchemaFieldInfo) -> (String, String?) {
     let varName = "parsed\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
+    let swiftType = SwiftType(from: property.type)
     
-    if swiftTypeToJsonSchemaType(property.type) != nil {
-        return ("\(varName) = \(property.type)(args[\"\(property.name)\"] ?? .null)", nil)
-    } else if property.type.hasPrefix("[") && property.type.hasSuffix("]") {
-        let elementType = String(property.type.dropFirst().dropLast())
+    switch swiftType {
+    case .basic(let basicType):
+        return ("\(varName) = \(basicType.rawValue)(args[\"\(property.name)\"] ?? .null)", nil)
+    case .array(let element):
         let rawName = "raw\(property.name.prefix(1).uppercased())\(property.name.dropFirst())"
         let guardBinding = "\(rawName) = args[\"\(property.name)\"]?.arrayValue"
-        let postGuard = "let \(varName) = \(rawName).compactMap({ \(elementType).parseArguments($0.objectValue ?? [:]) })"
-        return (guardBinding, postGuard)
-    } else {
-        return ("\(varName) = \(property.type).parseArguments(args[\"\(property.name)\"]?.objectValue ?? Dictionary<String, MCP.Value>())", nil)
+        
+        switch element {
+        case .basic(let basicType):
+            let postGuard = "let \(varName) = \(rawName).compactMap({ \(basicType.rawValue)($0) })"
+            return (guardBinding, postGuard)
+        case .custom(let typeName):
+            let postGuard = "let \(varName) = \(rawName).compactMap({ \(typeName).parseArguments($0.objectValue ?? [:]) })"
+            return (guardBinding, postGuard)
+        default:
+            let postGuard = "let \(varName) = \(rawName) /* TODO: Complex array element */"
+            return (guardBinding, postGuard)
+        }
+    case .custom(let typeName):
+        return ("\(varName) = \(typeName).parseArguments(args[\"\(property.name)\"]?.objectValue ?? Dictionary<String, MCP.Value>())", nil)
+    case .optional:
+        // Required fields shouldn't be optional, but handle gracefully
+        return ("\(varName) = /* TODO: Required optional */ nil", nil)
     }
 }
 
 private func generateSchemaTypeChecks(for properties: [SchemaFieldInfo]) -> [String] {
     var schemaCheckLines: [String] = []
+    var checkedTypes: Set<String> = []
     
-    func collectSchemaCheck(for typeName: String) {
-        if swiftTypeToJsonSchemaType(typeName) == nil {
-            schemaCheckLines.append("_requireSchema(\(typeName).self)")
+    func collectSchemaCheck(for type: SwiftType) {
+        switch type {
+        case .basic:
+            // No schema check needed for basic types
+            break
+        case .array(let element):
+            collectSchemaCheck(for: element)
+        case .optional(let wrapped):
+            collectSchemaCheck(for: wrapped)
+        case .custom(let typeName):
+            if !checkedTypes.contains(typeName) {
+                checkedTypes.insert(typeName)
+                schemaCheckLines.append("_requireSchema(\(typeName).self)")
+            }
         }
     }
     
     for property in properties {
-        let baseType = property.type.replacingOccurrences(of: "?", with: "")
-        if baseType.hasPrefix("[") && baseType.hasSuffix("]") {
-            let elementType = String(baseType.dropFirst().dropLast())
-            collectSchemaCheck(for: elementType)
-        } else {
-            collectSchemaCheck(for: baseType)
-        }
+        let swiftType = SwiftType(from: property.type)
+        collectSchemaCheck(for: swiftType)
     }
     
     return schemaCheckLines
@@ -455,19 +507,95 @@ private func generateSchemaExtension(
     )
 }
 
-private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String? {
-    switch swiftType {
-    case "String":
-        return "string"
-    case "Int":
-        return "integer"
-    case "Double", "Float":
-        return "number"
-    case "Bool":
-        return "boolean"
-    default:
-        return nil
+// MARK: - Type Classification System
+
+indirect enum SwiftType {
+    case basic(BasicType)
+    case array(element: SwiftType)
+    case optional(wrapped: SwiftType)
+    case custom(String)
+    
+    enum BasicType: String, CaseIterable {
+        case string = "String"
+        case int = "Int"
+        case double = "Double"
+        case float = "Float"
+        case bool = "Bool"
+        
+        var jsonSchemaType: String {
+            switch self {
+            case .string: return "string"
+            case .int: return "integer"
+            case .double, .float: return "number"
+            case .bool: return "boolean"
+            }
+        }
     }
+    
+    init(from typeString: String) {
+        let cleanType = typeString.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Handle optional types
+        if cleanType.hasSuffix("?") {
+            let wrappedType = String(cleanType.dropLast())
+            self = .optional(wrapped: SwiftType(from: wrappedType))
+            return
+        }
+        
+        // Handle array types
+        if cleanType.hasPrefix("[") && cleanType.hasSuffix("]") {
+            let elementType = String(cleanType.dropFirst().dropLast())
+            self = .array(element: SwiftType(from: elementType))
+            return
+        }
+        
+        // Handle basic types
+        if let basicType = BasicType(rawValue: cleanType) {
+            self = .basic(basicType)
+            return
+        }
+        
+        // Custom/nested types
+        self = .custom(cleanType)
+    }
+    
+    var jsonSchemaType: String? {
+        switch self {
+        case .basic(let basicType):
+            return basicType.jsonSchemaType
+        case .array:
+            return "array"
+        case .optional(let wrapped):
+            return wrapped.jsonSchemaType
+        case .custom:
+            return nil
+        }
+    }
+    
+    var isBasicType: Bool {
+        switch self {
+        case .basic: return true
+        case .optional(let wrapped): return wrapped.isBasicType
+        default: return false
+        }
+    }
+    
+    var baseTypeName: String {
+        switch self {
+        case .basic(let basicType):
+            return basicType.rawValue
+        case .array(let element):
+            return "[\(element.baseTypeName)]"
+        case .optional(let wrapped):
+            return wrapped.baseTypeName
+        case .custom(let name):
+            return name
+        }
+    }
+}
+
+private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String? {
+    return SwiftType(from: swiftType).jsonSchemaType
 }
 
 
@@ -506,15 +634,15 @@ public struct FieldMacro: PeerMacro {
         providingPeersOf declaration: some DeclSyntaxProtocol,
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
-        // 方案A：@Field 純標記性質，不生成任何代碼（仿照 Foundation Models 的 @Guide）
-        // 所有資訊將在 @Schema/@NestedSchema 展開時直接從 AST 解析
+        // Approach A: @Field is pure annotation, generates no code (following Foundation Models' @Guide)
+        // All information will be parsed directly from AST during @Schema expansion
         return []
     }
 }
 
-// 解析 FieldConstraint 枚舉值
+// Parse FieldConstraint enum values
 private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintInfo? {
-    // 處理 .options(["value1", "value2"]) 等格式  
+    // Handle formats like .options(["value1", "value2"])  
     if let functionCall = expression.as(FunctionCallExprSyntax.self),
        let memberAccess = functionCall.calledExpression.as(MemberAccessExprSyntax.self) {
         
@@ -522,7 +650,7 @@ private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintIn
         
         switch memberName {
         case "options":
-            // 解析 .options(["light", "dark"])
+            // Parse .options(["light", "dark"])
             if let arrayArg = functionCall.arguments.first?.expression.as(ArrayExprSyntax.self) {
                 let options = arrayArg.elements.compactMap { element -> String? in
                     if let stringLiteral = element.expression.as(StringLiteralExprSyntax.self),
@@ -536,17 +664,17 @@ private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintIn
                 }
             }
         case "range":
-            // 解析 .range(0...120)
+            // Parse .range(0...120)
             if let rangeArg = functionCall.arguments.first?.expression {
                 return parseRangeConstraintFromExpression(rangeArg)
             }
         case "rangeDouble":
-            // 解析 .rangeDouble(0.0...100.0)
+            // Parse .rangeDouble(0.0...100.0)
             if let rangeArg = functionCall.arguments.first?.expression {
                 return parseRangeConstraintFromExpression(rangeArg)
             }
         case "count":
-            // 解析 .count(5)
+            // Parse .count(5)
             if let intArg = functionCall.arguments.first?.expression.as(IntegerLiteralExprSyntax.self),
                let value = Int(intArg.literal.text) {
                 return FieldConstraintInfo(.count(value: value))
@@ -558,9 +686,9 @@ private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintIn
     return nil
 }
 
-// 合併重複的約束解析邏輯
+// Combine duplicate constraint parsing logic
 private func parseRangeConstraintFromExpression(_ expression: ExprSyntax) -> FieldConstraintInfo? {
-    // 統一處理 ClosedRange 表達式 (0...120, 0.0...100.0)
+    // Handle ClosedRange expressions uniformly (0...120, 0.0...100.0)
     if let sequenceExpr = expression.as(SequenceExprSyntax.self) {
         let elements = sequenceExpr.elements
         if elements.count >= 3,
@@ -570,7 +698,7 @@ private func parseRangeConstraintFromExpression(_ expression: ExprSyntax) -> Fie
             let minStr = minElement.trimmed.description
             let maxStr = maxElement.trimmed.description
             
-            // 檢查是否為浮點數
+            // Check if it's a floating point number
             if minStr.contains(".") || maxStr.contains(".") {
                 if let minDouble = Double(minStr), let maxDouble = Double(maxStr) {
                     return FieldConstraintInfo(.rangeDouble(min: minDouble, max: maxDouble))
