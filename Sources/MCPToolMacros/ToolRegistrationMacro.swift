@@ -369,20 +369,6 @@ private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String? {
     }
 }
 
-private func generateSafeDefault(for type: String) -> String {
-    // 為非 @Field 屬性生成類型安全的預設值
-    if type.contains("String") && !type.hasSuffix("?") {
-        return "\"\""
-    } else if type.contains("Int") && !type.hasSuffix("?") {
-        return "0"
-    } else if type.contains("Bool") && !type.hasSuffix("?") {
-        return "false"
-    } else if type.hasPrefix("[") && type.hasSuffix("]") {
-        return "[]"
-    } else {
-        return "nil"
-    }
-}
 
 // MARK: - Schema Macro (Simpler API)
 
