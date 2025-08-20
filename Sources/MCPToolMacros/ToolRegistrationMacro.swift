@@ -4,25 +4,35 @@ import SwiftSyntaxBuilder
 
 // MARK: - Schema Field Information
 struct SchemaFieldInfo {
+    // Field name. Used as the key in JSON Schema properties and to read from args during parsing.
     let name: String
+    // Original Swift type string (may include ? or array syntax). Used to decide unwrap strategy and JSON Schema type.
     let type: String
+    // Optional description. Emitted to JSON Schema as "description".
     let description: String?
-    let isRequired: Bool
-    let isOptional: Bool
+    // Business-level required flag:
+    // - Drives inputSchema "required" list
+    // - Decides whether parsing uses guard
+    // Rule: non-optional type AND no default value => true; otherwise false
+    let isRequiredField: Bool
+    // Type-level optionality only. True if the Swift type ends with '?'.
+    // It only affects how we unwrap/convert values, not whether we guard.
+    let isOptionalType: Bool
+    // Extra constraints for JSON Schema (minimum/maximum/enum/minItems/maxItems).
     let constraint: FieldConstraintInfo?
 
     init(
         name: String,
         type: String,
         description: String? = nil,
-        isRequired: Bool = true,
+        isRequiredField: Bool = true,
         constraint: FieldConstraintInfo? = nil
     ) {
         self.name = name
         self.type = type
         self.description = description
-        self.isRequired = isRequired
-        self.isOptional = type.hasSuffix("?")
+        self.isRequiredField = isRequiredField
+        self.isOptionalType = type.hasSuffix("?")
         self.constraint = constraint
     }
 }
@@ -102,8 +112,8 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
             let propertyName = pattern.identifier.text
             let propertyType = typeAnnotation.type.trimmed.description
             var description: String?
-            var isRequired: Bool? = nil
             var constraint: FieldConstraintInfo? = nil
+            let hasDefaultValue = binding.initializer != nil
 
             for attribute in varDecl.attributes {
                 if let attributeNode = attribute.as(AttributeSyntax.self),
@@ -118,10 +128,6 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
                                    let segment = stringLiteral.segments.first?.as(StringSegmentSyntax.self) {
                                     description = segment.content.text
                                 }
-                            case "isRequired":
-                                if let boolLiteral = argument.expression.as(BooleanLiteralExprSyntax.self) {
-                                    isRequired = boolLiteral.literal.text == "true"
-                                }
                             case "constraint":
                                 // Parse FieldConstraint enum value
                                 constraint = parseFieldConstraint(argument.expression)
@@ -133,14 +139,15 @@ private func extractSchemaFields(from structDecl: StructDeclSyntax) -> [SchemaFi
                 }
             }
 
-            // If isRequired not specified, infer from property type
-            let finalIsRequired = isRequired ?? !propertyType.hasSuffix("?")
+            // Determine isRequired solely by type optionality and presence of a default value
+            // optional OR has default -> not required; non-optional AND no default -> required
+            let finalIsRequired = !propertyType.hasSuffix("?") && !hasDefaultValue
 
             fieldInfos.append(SchemaFieldInfo(
                 name: propertyName,
                 type: propertyType,
                 description: description,
-                isRequired: finalIsRequired,
+                isRequiredField: finalIsRequired,
                 constraint: constraint
             ))
         }
@@ -236,7 +243,7 @@ private func generateAdvancedSchemaProperties(from properties: [SchemaFieldInfo]
 }
 
 private func generateRequiredFields(from properties: [SchemaFieldInfo]) -> String {
-    let requiredFields = properties.filter { $0.isRequired }.map { ".string(\"\($0.name)\")" }
+    let requiredFields = properties.filter { $0.isRequiredField }.map { ".string(\"\($0.name)\")" }
     return requiredFields.joined(separator: ",\n\(SCHEMA_INDENT)")
 }
 
@@ -253,8 +260,9 @@ private func classifyProperties(from structDecl: StructDeclSyntax) -> PropertyCl
     let schemaFields = extractSchemaFields(from: structDecl)
     let allProperties = extractAllProperties(from: structDecl)
     
-    let optionalFields = schemaFields.filter { $0.isOptional }
-    let requiredFields = schemaFields.filter { !$0.isOptional }
+    // Use isRequiredField to split required and optional so schema and parsing stay consistent
+    let requiredFields = schemaFields.filter { $0.isRequiredField }
+    let optionalFields = schemaFields.filter { !$0.isRequiredField }
     
     return PropertyClassification(
         schemaFields: schemaFields,
