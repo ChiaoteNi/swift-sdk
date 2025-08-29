@@ -172,74 +172,75 @@ private let PROPERTY_INDENT = indent(IndentLevel.property)
 
 private func generateAdvancedSchemaProperties(from properties: [SchemaFieldInfo], in root: Syntax) -> String {
     return properties.map { property in
-        let baseType = property.type.replacingOccurrences(of: "?", with: "")
-        if let jsonSchemaType = swiftTypeToJsonSchemaType(baseType) {
-            var schemaComponents: [String] = ["\"type\": .string(\"\(jsonSchemaType)\")"]
-
-            if let description = property.description {
-                schemaComponents.append("\"description\": .string(\"\(description)\")")
-            }
-
-            // Add constraint properties to JSON Schema
-            if let constraint = property.constraint {
-                switch constraint.type {
-                case .range(let min, let max):
-                    schemaComponents.append("\"minimum\": .int(\(min))")
-                    schemaComponents.append("\"maximum\": .int(\(max))")
-                case .rangeDouble(let min, let max):
-                    schemaComponents.append("\"minimum\": .double(\(min))")
-                    schemaComponents.append("\"maximum\": .double(\(max))")
-                case .count(_):
-                    // This will be handled in array processing section
-                    break
-                case .options(let values):
-                    let enumValuesString = values.map { ".string(\"\($0)\")" }.joined(separator: ", ")
-                    schemaComponents.append("\"enum\": .array([\(enumValuesString)])")
-                }
-            }
-
-            let schemaString = schemaComponents.joined(separator: ",\n\(PROPERTY_INDENT)")
-            return "\"\(property.name)\": .object([\n\(PROPERTY_INDENT)\(schemaString)\n\(SCHEMA_INDENT)])"
-        } else if baseType.hasPrefix("[") && baseType.hasSuffix("]") {
-            // Handle array types
-            let elementType = String(baseType.dropFirst().dropLast()) // Remove [ and ]
-            if let jsonSchemaType = swiftTypeToJsonSchemaType(elementType) {
-                var schemaComponents: [String] = ["\"type\": .string(\"array\")"]
-                schemaComponents.append("\"items\": .object([\"type\": .string(\"\(jsonSchemaType)\")])")
-
-                if let description = property.description {
-                    schemaComponents.append("\"description\": .string(\"\(description)\")")
-                }
-
-                // Add array-specific constraints
-                if let constraint = property.constraint {
-                    switch constraint.type {
-                    case .count(let value):
-                        schemaComponents.append("\"minItems\": .int(\(value))")
-                        schemaComponents.append("\"maxItems\": .int(\(value))")
-                    default:
-                        break
-                    }
-                }
-
-                let schemaString = schemaComponents.joined(separator: ",\n\(PROPERTY_INDENT)")
-                return "\"\(property.name)\": .object([\n\(PROPERTY_INDENT)\(schemaString)\n\(SCHEMA_INDENT)])"
-            } else {
-                // Assume nested @Schema type; let the compiler enforce conformance via helper
-                var schemaComponents: [String] = ["\"type\": .string(\"array\")"]
-                schemaComponents.append("\"items\": \(elementType).inputSchema")
-
-                if let description = property.description {
-                    schemaComponents.append("\"description\": .string(\"\(description)\")")
-                }
-
-                let schemaString = schemaComponents.joined(separator: ",\n\(PROPERTY_INDENT)")
-                return "\"\(property.name)\": .object([\n\(PROPERTY_INDENT)\(schemaString)\n\(SCHEMA_INDENT)])"
-            }
-        } else {
-            return "\"\(property.name)\": \(baseType).inputSchema"
-        }
+        let swiftType = SwiftType(from: property.type)
+        let schemaValue = schemaForProperty(type: swiftType, description: property.description, constraint: property.constraint)
+        return "\"\(property.name)\": \(schemaValue)"
     }.joined(separator: ",\n\(SCHEMA_INDENT)")
+}
+
+// Generate the schema value for a property (right-hand side of the "name": ... pair)
+private func schemaForProperty(type: SwiftType, description: String?, constraint: FieldConstraintInfo?) -> String {
+    switch type {
+    case .optional(let wrapped):
+        // Optionality is handled by the "required" array; schema is of the wrapped type
+        return schemaForProperty(type: wrapped, description: description, constraint: constraint)
+    case .basic(let basicType):
+        var components: [String] = ["\"type\": .string(\"\(basicType.jsonSchemaType)\")"]
+        if let description = description {
+            components.append("\"description\": .string(\"\(description)\")")
+        }
+        if let constraint = constraint {
+            switch constraint.type {
+            case .range(let min, let max):
+                components.append("\"minimum\": .int(\(min))")
+                components.append("\"maximum\": .int(\(max))")
+            case .rangeDouble(let min, let max):
+                components.append("\"minimum\": .double(\(min))")
+                components.append("\"maximum\": .double(\(max))")
+            case .options(let values):
+                let enumValuesString = values.map { ".string(\"\($0)\")" }.joined(separator: ", ")
+                components.append("\"enum\": .array([\(enumValuesString)])")
+            case .count:
+                // count applies to arrays; ignore here
+                break
+            }
+        }
+        let body = components.joined(separator: ",\n\(PROPERTY_INDENT)")
+        return ".object([\n\(PROPERTY_INDENT)\(body)\n\(SCHEMA_INDENT)])"
+    case .array(let element):
+        var components: [String] = ["\"type\": .string(\"array\")"]
+        let itemSchema = schemaForItems(type: element)
+        components.append("\"items\": \(itemSchema)")
+        if let description = description {
+            components.append("\"description\": .string(\"\(description)\")")
+        }
+        if let constraint = constraint {
+            if case .count(let value) = constraint.type {
+                components.append("\"minItems\": .int(\(value))")
+                components.append("\"maxItems\": .int(\(value))")
+            }
+        }
+        let body = components.joined(separator: ",\n\(PROPERTY_INDENT)")
+        return ".object([\n\(PROPERTY_INDENT)\(body)\n\(SCHEMA_INDENT)])"
+    case .custom(let name):
+        // Delegate to nested schema provider
+        return "\(name).inputSchema"
+    }
+}
+
+// Generate the schema value for array items (a MCP.Value expression)
+private func schemaForItems(type: SwiftType) -> String {
+    switch type {
+    case .optional(let wrapped):
+        return schemaForItems(type: wrapped)
+    case .basic(let basicType):
+        return ".object([\"type\": .string(\"\(basicType.jsonSchemaType)\")])"
+    case .array(let nested):
+        let nestedItems = schemaForItems(type: nested)
+        return ".object([\"type\": .string(\"array\"), \"items\": \(nestedItems)])"
+    case .custom(let name):
+        return "\(name).inputSchema"
+    }
 }
 
 private func generateRequiredFields(from properties: [SchemaFieldInfo]) -> String {
