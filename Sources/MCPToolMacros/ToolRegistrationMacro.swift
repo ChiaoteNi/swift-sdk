@@ -37,12 +37,79 @@ struct SchemaFieldInfo {
     }
 }
 
+// MARK: - Constraint Validation (compile-time)
+
+private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
+    for field in fields {
+        guard let constraint = field.constraint else { continue }
+        let swiftType = SwiftType(from: field.type)
+
+        func error(_ message: String) throws -> Never { throw MacroError.unsupportedType(message) }
+        let isWhole: (Double) -> Bool = { $0.rounded() == $0 }
+
+        switch swiftType {
+        case .optional(let wrapped):
+            try validateConstraints(for: [SchemaFieldInfo(name: field.name, type: wrapped.baseTypeName, description: field.description, isRequiredField: field.isRequiredField, constraint: field.constraint)])
+        case .basic(let basicType):
+            switch basicType {
+            case .string:
+                switch constraint.type {
+                case .range(let min, let max):
+                    guard isWhole(min), isWhole(max) else {
+                        try error("Property '\(field.name)' of type String requires integer length bounds for .range")
+                    }
+                case .options:
+                    break // OK
+                }
+            case .int:
+                switch constraint.type {
+                case .range(let min, let max):
+                    guard isWhole(min), isWhole(max) else {
+                        try error("Property '\(field.name)' of type Int requires integer bounds for .range")
+                    }
+                case .options:
+                    break // allow enums on ints if desired
+                }
+            case .double, .float:
+                switch constraint.type {
+                case .range:
+                    break // OK
+                case .options:
+                    break
+                }
+            case .bool:
+                try error("Property '\(field.name)' of type Bool does not support range constraints")
+            }
+        case .array:
+            switch constraint.type {
+            case .range(let min, let max):
+                guard isWhole(min), isWhole(max) else {
+                    try error("Property '\(field.name)' of array type requires integer item count bounds for .range")
+                }
+            case .options:
+                // Not typical for arrays; allow or ignore silently
+                break
+            }
+        case .custom:
+            switch constraint.type {
+            case .range:
+                try error("Property '\(field.name)' of custom type does not support range constraints")
+            case .options:
+                break
+            }
+        }
+    }
+}
+
 // MARK: - Field Constraint Information
 struct FieldConstraintInfo {
     enum ConstraintType {
-        case range(min: Int, max: Int)
-        case rangeDouble(min: Double, max: Double)
-        case count(value: Int)
+        // Unified range with Double bounds; integrality is validated per-type where required.
+        // - String: min/max must be integers → minLength/maxLength
+        // - Array:  min/max must be integers → minItems/maxItems
+        // - Int:    min/max must be integers → minimum/maximum (integer)
+        // - Double/Float: doubles allowed     → minimum/maximum (number)
+        case range(min: Double, max: Double)
         case options([String])
     }
 
@@ -192,17 +259,19 @@ private func schemaForProperty(type: SwiftType, description: String?, constraint
         if let constraint = constraint {
             switch constraint.type {
             case .range(let min, let max):
-                components.append("\"minimum\": .int(\(min))")
-                components.append("\"maximum\": .int(\(max))")
-            case .rangeDouble(let min, let max):
-                components.append("\"minimum\": .double(\(min))")
-                components.append("\"maximum\": .double(\(max))")
+                if basicType == .string {
+                    components.append("\"minLength\": .int(\(Int(min)))")
+                    components.append("\"maxLength\": .int(\(Int(max)))")
+                } else if basicType == .double || basicType == .float {
+                    components.append("\"minimum\": .double(\(min))")
+                    components.append("\"maximum\": .double(\(max))")
+                } else {
+                    components.append("\"minimum\": .int(\(Int(min)))")
+                    components.append("\"maximum\": .int(\(Int(max)))")
+                }
             case .options(let values):
                 let enumValuesString = values.map { ".string(\"\($0)\")" }.joined(separator: ", ")
                 components.append("\"enum\": .array([\(enumValuesString)])")
-            case .count:
-                // count applies to arrays; ignore here
-                break
             }
         }
         let body = components.joined(separator: ",\n\(PROPERTY_INDENT)")
@@ -215,9 +284,13 @@ private func schemaForProperty(type: SwiftType, description: String?, constraint
             components.append("\"description\": .string(\"\(description)\")")
         }
         if let constraint = constraint {
-            if case .count(let value) = constraint.type {
-                components.append("\"minItems\": .int(\(value))")
-                components.append("\"maxItems\": .int(\(value))")
+            switch constraint.type {
+            case .range(let min, let max):
+                components.append("\"minItems\": .int(\(Int(min)))")
+                components.append("\"maxItems\": .int(\(Int(max)))")
+            case .options:
+                // options is not typically used for arrays; ignore
+                break
             }
         }
         let body = components.joined(separator: ",\n\(PROPERTY_INDENT)")
@@ -503,6 +576,8 @@ private func generateSchemaExtension(
     // 3. Generate parsing logic
     let parsingLogic = try generateParsingLogic(for: classification)
     
+    try validateConstraints(for: classification.schemaFields)
+
     // 4. Assemble final extension
     return try assembleExtension(
         for: type,
@@ -673,20 +748,9 @@ private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintIn
                 }
             }
         case "range":
-            // Parse .range(0...120)
+            // Parse .range(0...120) or .range(0.0...1.0)
             if let rangeArg = functionCall.arguments.first?.expression {
                 return parseRangeConstraintFromExpression(rangeArg)
-            }
-        case "rangeDouble":
-            // Parse .rangeDouble(0.0...100.0)
-            if let rangeArg = functionCall.arguments.first?.expression {
-                return parseRangeConstraintFromExpression(rangeArg)
-            }
-        case "count":
-            // Parse .count(5)
-            if let intArg = functionCall.arguments.first?.expression.as(IntegerLiteralExprSyntax.self),
-               let value = Int(intArg.literal.text) {
-                return FieldConstraintInfo(.count(value: value))
             }
         default:
             break
@@ -707,15 +771,9 @@ private func parseRangeConstraintFromExpression(_ expression: ExprSyntax) -> Fie
             let minStr = minElement.trimmed.description
             let maxStr = maxElement.trimmed.description
             
-            // Check if it's a floating point number
-            if minStr.contains(".") || maxStr.contains(".") {
-                if let minDouble = Double(minStr), let maxDouble = Double(maxStr) {
-                    return FieldConstraintInfo(.rangeDouble(min: minDouble, max: maxDouble))
-                }
-            } else {
-                if let minInt = Int(minStr), let maxInt = Int(maxStr) {
-                    return FieldConstraintInfo(.range(min: minInt, max: maxInt))
-                }
+            // Parse both integer and floating ranges as Double; integrality is validated later per type
+            if let minDouble = Double(minStr), let maxDouble = Double(maxStr) {
+                return FieldConstraintInfo(.range(min: minDouble, max: maxDouble))
             }
         }
     }
