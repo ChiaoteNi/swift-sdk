@@ -59,7 +59,7 @@ private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
                         try error("Property '\(field.name)' of type String requires integer length bounds for .range")
                     }
                 case .options:
-                    break // OK
+                    break
                 }
             case .int:
                 switch constraint.type {
@@ -68,12 +68,12 @@ private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
                         try error("Property '\(field.name)' of type Int requires integer bounds for .range")
                     }
                 case .options:
-                    break // allow enums on ints if desired
+                    break
                 }
             case .double, .float:
                 switch constraint.type {
                 case .range:
-                    break // OK
+                    break
                 case .options:
                     break
                 }
@@ -87,7 +87,6 @@ private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
                     try error("Property '\(field.name)' of array type requires integer item count bounds for .range")
                 }
             case .options:
-                // Not typical for arrays; allow or ignore silently
                 break
             }
         case .custom:
@@ -233,7 +232,7 @@ private struct IndentLevel {
     static let property = 5    // 20 spaces for property level
 }
 
-// Legacy constants for compatibility
+// Indent constants for formatting
 private let SCHEMA_INDENT = indent(IndentLevel.schema)
 private let PROPERTY_INDENT = indent(IndentLevel.property)
 
@@ -296,12 +295,11 @@ private func schemaForProperty(type: SwiftType, description: String?, constraint
         let body = components.joined(separator: ",\n\(PROPERTY_INDENT)")
         return ".object([\n\(PROPERTY_INDENT)\(body)\n\(SCHEMA_INDENT)])"
     case .custom(let name):
-        // Delegate to nested schema provider
         return "\(name).inputSchema"
     }
 }
 
-// Generate the schema value for array items (a MCP.Value expression)
+// Generate schema for array items
 private func schemaForItems(type: SwiftType) -> String {
     switch type {
     case .optional(let wrapped):
@@ -334,7 +332,7 @@ private func classifyProperties(from structDecl: StructDeclSyntax) -> PropertyCl
     let schemaFields = extractSchemaFields(from: structDecl)
     let allProperties = extractAllProperties(from: structDecl)
     
-    // Use isRequiredField to split required and optional so schema and parsing stay consistent
+    // Split required and optional via isRequiredField for consistency
     let requiredFields = schemaFields.filter { $0.isRequiredField }
     let optionalFields = schemaFields.filter { !$0.isRequiredField }
     
@@ -403,7 +401,7 @@ private func generateOptionalExtraction(for property: SchemaFieldInfo) -> String
     case .optional(let wrapped):
         return generateOptionalExtractionForType(varName: varName, propertyName: property.name, type: wrapped)
     default:
-        // This shouldn't happen for optional properties, but handle gracefully
+        // Fallback for unexpected optional typing
         return generateOptionalExtractionForType(varName: varName, propertyName: property.name, type: swiftType)
     }
 }
@@ -424,7 +422,7 @@ private func generateOptionalExtractionForType(varName: String, propertyName: St
     case .custom(let typeName):
         return "let \(varName) = args[\"\(propertyName)\"].flatMap { \(typeName).parseArguments($0.objectValue ?? Dictionary<String, MCP.Value>()) }"
     case .optional:
-        // Nested optionals, shouldn't happen in well-formed types
+        // Fallback for nested optionals
         return "let \(varName) = args[\"\(propertyName)\"] /* TODO: Nested optional */"
     }
 }
@@ -454,7 +452,7 @@ private func generateRequiredFieldLogic(for property: SchemaFieldInfo) -> (Strin
     case .custom(let typeName):
         return ("\(varName) = \(typeName).parseArguments(args[\"\(property.name)\"]?.objectValue ?? Dictionary<String, MCP.Value>())", nil)
     case .optional:
-        // Required fields shouldn't be optional, but handle gracefully
+        // Fallback: required optional
         return ("\(varName) = /* TODO: Required optional */ nil", nil)
     }
 }
@@ -466,7 +464,7 @@ private func generateSchemaTypeChecks(for properties: [SchemaFieldInfo]) -> [Str
     func collectSchemaCheck(for type: SwiftType) {
         switch type {
         case .basic:
-            // No schema check needed for basic types
+            // No schema check for basic types
             break
         case .array(let element):
             collectSchemaCheck(for: element)
@@ -494,11 +492,11 @@ private func generatePropertyConstructorList(
 ) throws -> String {
     return try allProperties.compactMap { propertyInfo -> String? in
         if let fieldProperty = schemaFields.first(where: { $0.name == propertyInfo.name }) {
-            // @Field property - use parsed value
+            // Use parsed value for @Field property
             let varName = "parsed\(fieldProperty.name.prefix(1).uppercased())\(fieldProperty.name.dropFirst())"
             return "\(propertyInfo.name): \(varName)"
         } else {
-            // Non-@Field property - handle based on type and defaults
+            // For non-@Field, handle by defaults and optionality
             if propertyInfo.hasDefaultValue {
                 return nil // Skip properties with default values
             } else if propertyInfo.isOptional {
@@ -678,9 +676,7 @@ indirect enum SwiftType {
     }
 }
 
-private func swiftTypeToJsonSchemaType(_ swiftType: String) -> String? {
-    return SwiftType(from: swiftType).jsonSchemaType
-}
+// Removed: swiftTypeToJsonSchemaType(_:) was unused
 
 
 // MARK: - Schema Macro (Simpler API)

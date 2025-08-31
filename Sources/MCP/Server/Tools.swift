@@ -270,7 +270,6 @@ public protocol MCPParameterParsable {
     static func parseArguments(_ args: [String: Value]) -> Self?
 }
 
-
 extension CallTool.Parameters {
     /// Parse tool parameters as a strongly-typed struct
     /// This provides type-safe parameter extraction instead of manual string-based parsing
