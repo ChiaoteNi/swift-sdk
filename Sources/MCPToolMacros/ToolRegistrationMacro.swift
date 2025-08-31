@@ -168,6 +168,105 @@ struct PropertyInfo {
     let hasDefaultValue: Bool
 }
 
+// Property classification model
+struct PropertyClassification {
+    let schemaFields: [SchemaFieldInfo]
+    let optionalFields: [SchemaFieldInfo]
+    let requiredFields: [SchemaFieldInfo]
+    let allProperties: [PropertyInfo]
+}
+
+// Parsing plan container
+struct ParsingLogic {
+    let optionalExtractions: [String]
+    let requiredGuardBindings: [String]
+    let requiredPostGuardLines: [String]
+    let schemaCheckLines: [String]
+    let propertyList: String
+}
+
+// Type classification model
+indirect enum SwiftType {
+    case basic(BasicType)
+    case array(element: SwiftType)
+    case optional(wrapped: SwiftType)
+    case custom(String)
+    
+    enum BasicType: String, CaseIterable {
+        case string = "String"
+        case int = "Int"
+        case double = "Double"
+        case float = "Float"
+        case bool = "Bool"
+        
+        var jsonSchemaType: String {
+            switch self {
+            case .string: return "string"
+            case .int: return "integer"
+            case .double, .float: return "number"
+            case .bool: return "boolean"
+            }
+        }
+    }
+    
+    init(from typeString: String) {
+        let cleanType = typeString.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if cleanType.hasSuffix("?") {
+            let wrappedType = String(cleanType.dropLast())
+            self = .optional(wrapped: SwiftType(from: wrappedType))
+            return
+        }
+        
+        if cleanType.hasPrefix("[") && cleanType.hasSuffix("]") {
+            let elementType = String(cleanType.dropFirst().dropLast())
+            self = .array(element: SwiftType(from: elementType))
+            return
+        }
+        
+        if let basicType = BasicType(rawValue: cleanType) {
+            self = .basic(basicType)
+            return
+        }
+        
+        self = .custom(cleanType)
+    }
+    
+    var jsonSchemaType: String? {
+        switch self {
+        case .basic(let basicType):
+            return basicType.jsonSchemaType
+        case .array:
+            return "array"
+        case .optional(let wrapped):
+            return wrapped.jsonSchemaType
+        case .custom:
+            return nil
+        }
+    }
+    
+    var isBasicType: Bool {
+        switch self {
+        case .basic: return true
+        case .optional(let wrapped): return wrapped.isBasicType
+        default: return false
+        }
+    }
+    
+    var baseTypeName: String {
+        switch self {
+        case .basic(let basicType):
+            return basicType.rawValue
+        case .array(let element):
+            return "[\(element.baseTypeName)]"
+        case .optional(let wrapped):
+            return wrapped.baseTypeName
+        case .custom(let name):
+            return name
+        }
+    }
+}
+
 private func extractAllProperties(from structDecl: StructDeclSyntax) -> [PropertyInfo] {
     var allProperties: [PropertyInfo] = []
 
@@ -360,13 +459,6 @@ private func generateRequiredFields(from properties: [SchemaFieldInfo]) -> Strin
 
 // MARK: - Property Classification
 
-struct PropertyClassification {
-    let schemaFields: [SchemaFieldInfo]
-    let optionalFields: [SchemaFieldInfo]
-    let requiredFields: [SchemaFieldInfo]
-    let allProperties: [PropertyInfo]
-}
-
 private func classifyProperties(from structDecl: StructDeclSyntax) -> PropertyClassification {
     let schemaFields = extractSchemaFields(from: structDecl)
     let allProperties = extractAllProperties(from: structDecl)
@@ -384,14 +476,6 @@ private func classifyProperties(from structDecl: StructDeclSyntax) -> PropertyCl
 }
 
 // MARK: - Parsing Logic Generation
-
-struct ParsingLogic {
-    let optionalExtractions: [String]
-    let requiredGuardBindings: [String]
-    let requiredPostGuardLines: [String]
-    let schemaCheckLines: [String]
-    let propertyList: String
-}
 
 private func generateParsingLogic(
     for classification: PropertyClassification
@@ -628,92 +712,6 @@ private func generateSchemaExtension(
     )
 }
 
-// MARK: - Type Classification System
-
-indirect enum SwiftType {
-    case basic(BasicType)
-    case array(element: SwiftType)
-    case optional(wrapped: SwiftType)
-    case custom(String)
-    
-    enum BasicType: String, CaseIterable {
-        case string = "String"
-        case int = "Int"
-        case double = "Double"
-        case float = "Float"
-        case bool = "Bool"
-        
-        var jsonSchemaType: String {
-            switch self {
-            case .string: return "string"
-            case .int: return "integer"
-            case .double, .float: return "number"
-            case .bool: return "boolean"
-            }
-        }
-    }
-    
-    init(from typeString: String) {
-        let cleanType = typeString.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        // Handle optional types
-        if cleanType.hasSuffix("?") {
-            let wrappedType = String(cleanType.dropLast())
-            self = .optional(wrapped: SwiftType(from: wrappedType))
-            return
-        }
-        
-        // Handle array types
-        if cleanType.hasPrefix("[") && cleanType.hasSuffix("]") {
-            let elementType = String(cleanType.dropFirst().dropLast())
-            self = .array(element: SwiftType(from: elementType))
-            return
-        }
-        
-        // Handle basic types
-        if let basicType = BasicType(rawValue: cleanType) {
-            self = .basic(basicType)
-            return
-        }
-        
-        // Custom/nested types
-        self = .custom(cleanType)
-    }
-    
-    var jsonSchemaType: String? {
-        switch self {
-        case .basic(let basicType):
-            return basicType.jsonSchemaType
-        case .array:
-            return "array"
-        case .optional(let wrapped):
-            return wrapped.jsonSchemaType
-        case .custom:
-            return nil
-        }
-    }
-    
-    var isBasicType: Bool {
-        switch self {
-        case .basic: return true
-        case .optional(let wrapped): return wrapped.isBasicType
-        default: return false
-        }
-    }
-    
-    var baseTypeName: String {
-        switch self {
-        case .basic(let basicType):
-            return basicType.rawValue
-        case .array(let element):
-            return "[\(element.baseTypeName)]"
-        case .optional(let wrapped):
-            return wrapped.baseTypeName
-        case .custom(let name):
-            return name
-        }
-    }
-}
 
 // Parse FieldConstraint enum values
 private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintInfo? {
