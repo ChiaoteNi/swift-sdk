@@ -54,6 +54,25 @@ public enum FieldConstraint {
     case range(ClosedRange<Int>)
     /// Specifies allowed enum values - LLM can only choose from these options
     case options([String])
+    /// Specifies dynamic enum values resolved at runtime from an expression
+    /// Usage: .dynamicOptions(DocumentType.allCases.map(\.rawValue))
+    case dynamicOptions(Any)
+}
+
+// MARK: - Convenience Extensions for Dynamic Options
+
+public extension FieldConstraint {
+    /// Creates a dynamic options constraint from a CaseIterable enum
+    /// Usage: .dynamicEnum(DocumentType.self)
+    static func dynamicEnum<T: CaseIterable & RawRepresentable>(_ enumType: T.Type) -> FieldConstraint where T.RawValue == String {
+        return .dynamicOptions(enumType.allCases.map(\.rawValue))
+    }
+    
+    /// Creates a dynamic options constraint from any sequence of strings
+    /// Usage: .dynamicSequence(myStringArray)
+    static func dynamicSequence<S: Sequence>(_ sequence: S) -> FieldConstraint where S.Element == String {
+        return .dynamicOptions(Array(sequence))
+    }
 }
 
 

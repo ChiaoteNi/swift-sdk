@@ -99,6 +99,8 @@ private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
                     }
                 case .options:
                     break
+                case .dynamicOptions:
+                    break
                 }
             case .int:
                 switch constraint.type {
@@ -108,12 +110,16 @@ private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
                     }
                 case .options:
                     break
+                case .dynamicOptions:
+                    break
                 }
             case .double, .float:
                 switch constraint.type {
                 case .range:
                     break
                 case .options:
+                    break
+                case .dynamicOptions:
                     break
                 }
             case .bool:
@@ -127,12 +133,16 @@ private func validateConstraints(for fields: [SchemaFieldInfo]) throws {
                 }
             case .options:
                 break
+            case .dynamicOptions:
+                break
             }
         case .custom:
             switch constraint.type {
             case .range:
                 try error("Property '\(field.name)' of custom type does not support range constraints")
             case .options:
+                break
+            case .dynamicOptions:
                 break
             }
         }
@@ -149,6 +159,8 @@ struct FieldConstraintInfo {
         // - Double/Float: doubles allowed     → minimum/maximum (number)
         case range(min: Double, max: Double)
         case options([String])
+        // Dynamic options that are resolved at runtime from an expression
+        case dynamicOptions(String)  // Stores the Swift expression as string
     }
 
     let type: ConstraintType
@@ -409,6 +421,9 @@ private func schemaForProperty(type: SwiftType, description: String?, constraint
             case .options(let values):
                 let enumValuesString = values.map { ".string(\"\($0)\")" }.joined(separator: ", ")
                 components.append("\"enum\": .array([\(enumValuesString)])")
+            case .dynamicOptions(let expression):
+                // Generate runtime enum resolution
+                components.append("\"enum\": .array(\(expression).map { .string($0) })")
             }
         }
         let body = components.joined(separator: ",\n\(PROPERTY_INDENT)")
@@ -427,6 +442,9 @@ private func schemaForProperty(type: SwiftType, description: String?, constraint
                 components.append("\"maxItems\": .int(\(Int(max)))")
             case .options:
                 // options is not typically used for arrays; ignore
+                break
+            case .dynamicOptions:
+                // dynamicOptions is not typically used for arrays; ignore
                 break
             }
         }
@@ -735,6 +753,28 @@ private func parseFieldConstraint(_ expression: ExprSyntax) -> FieldConstraintIn
                 if !options.isEmpty {
                     return FieldConstraintInfo(.options(options))
                 }
+            }
+        case "dynamicOptions":
+            // Parse .dynamicOptions(DocumentType.allCases.map(\.rawValue))
+            if let firstArg = functionCall.arguments.first?.expression {
+                let expressionString = firstArg.description.trimmingCharacters(in: .whitespacesAndNewlines)
+                return FieldConstraintInfo(.dynamicOptions(expressionString))
+            }
+        case "dynamicEnum":
+            // Parse .dynamicEnum(DocumentType.self)
+            if let firstArg = functionCall.arguments.first?.expression {
+                let typeExpression = firstArg.description.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Convert MyType.self to MyType.allCases.map(\.rawValue)
+                let dynamicExpression = typeExpression.replacingOccurrences(of: ".self", with: ".allCases.map(\\.rawValue)")
+                return FieldConstraintInfo(.dynamicOptions(dynamicExpression))
+            }
+        case "dynamicSequence":
+            // Parse .dynamicSequence(myArray)
+            if let firstArg = functionCall.arguments.first?.expression {
+                let sequenceExpression = firstArg.description.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Wrap array conversion to ensure we get [String]
+                let dynamicExpression = "Array(\(sequenceExpression))"
+                return FieldConstraintInfo(.dynamicOptions(dynamicExpression))
             }
         case "range":
             // Parse .range(0...120) or .range(0.0...1.0)
